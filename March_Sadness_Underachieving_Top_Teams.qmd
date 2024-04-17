@@ -1,0 +1,256 @@
+---
+title: "March Sadness - Using KenPom Ratings to Identify Underachieving Teams"
+author: "Jeff Feyerer"
+format: html
+---
+
+The study presented here is based on a large segment of data from KenPom.com and information I've been using for years to pinpoint those teams who fail in the NCAA Tournament. I've pivoted this research which used to be trying to find a winner to being proactive about finding teams (and reasons) that will NOT win the tournament.
+
+While the NCAA Tournament is constructed by a group of administrators sequestered in a room backed by very nebulous data and metric use, I believe a solely-metric based construction of the tournament bracket should be employed
+
+Below, I look at the possibility that teams seeded 1-4 in the tournment underachieve due to the fact they've been overseeded in the tournament relative to their performance and efficiency metrics via KenPom.com
+
+## Add packages from library
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(sjPlot)
+library(marginaleffects)
+library(stringr)
+```
+
+## Read in KenPom summary data from CSV/Excel
+
+```{r}
+KenPom <- read.csv("C:/Users/jfeyerer/Downloads/KenPom_Summary.csv")
+```
+
+## Oraganize data by season and efficiency margin
+
+```{r}
+KenPom <- KenPom %>% 
+  group_by(Season) %>% 
+  arrange(desc(Season), desc(AdjEM))
+```
+
+## Combining team and year to make one variable  
+
+```{r}
+KenPom <- KenPom %>% 
+  mutate(YearTeam = paste(Season,TeamName))
+```
+
+## Create a variable called ExpWins (Expected wins) where predicted wins are based strictly on the nature of their seeds.
+
+```{r}
+KenPom <- KenPom %>% 
+  group_by(Seed) %>% 
+  mutate(ExpectedWins = case_when(
+    Seed == 1 ~ 4,
+    Seed %in% c(2, 3, 4) ~ 3,
+    Seed %in% c(5, 6, 7) ~ 1,
+    Seed %in% c(8, 9) ~ 0.5,
+    TRUE ~ NA_real_
+  ))
+
+glimpse(KenPom) 
+
+summary(KenPom)
+```
+
+## Add a new variable called WvsEXP (Wins vs Expected). This takes their actual tournament wins versus their expected tournament wins. I'm not including any games in the Final Four since its more of a tossup, especially with the potential of multiple #1 seeds playing each other.
+
+```{r}
+KenPom <- KenPom %>% 
+  mutate(WvsEXP = Wins - ExpectedWins)
+```
+
+
+## The first model I'm looking at via the generalized linear model is wins vs expected by seed. 
+
+```{r}
+WEXPSeed_Model <- glm(WvsEXP ~ Seed, data = KenPom, family = gaussian())
+
+summary(WEXPSeed_Model)
+
+```
+
+```{r}
+ggplot(data = WEXPSeed_Model, mapping=aes(x = Seed,
+                                          y = WvsEXP)) + 
+  geom_point() + theme_minimal()
+```
+
+## This result was expected and not exactly what I'm looking for.
+
+## In order to turn this model into one where a binomial result will suffice, I will add a variable titled U_O which will simply denote whether a team has underachieved based on the aforementioned seed expectations. 1 notes underachieved.
+
+```{r}
+KenPom <- KenPom %>% 
+  mutate(U_O = ifelse(WvsEXP<0, 1, 0))
+```
+
+## Using the new variable, I'll set up the GLM with the binomial family to create a percentage chance each seed will underachieve by seed.
+
+```{r}
+U_O_Seed_Model <- glm(U_O ~ Seed,
+                     data = KenPom,
+                     family = binomial)
+
+summary(U_O_Seed_Model)
+```
+## I want to now plot this model to find the predicted probabilities of underachieving for each seed in the dataset
+
+```{r}
+plot_model(U_O_Seed_Model, type = "pred", term = "Seed") + 
+  xlab("Seed") + ylab("% Chance of Underachieving") + 
+  theme_minimal() + scale_x_continuous(breaks = seq(0, 9, by = 1)) + 
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1)) 
+
+```
+
+## The next variable I'm adding is SeedAdj. This will give each team a difference between what they were seeded (1-16) and their seed would have been had the entire field of 64 teams been seeded strictly by a stat titled efficiency margin. These numbers from KenPom.com gives each team a margin of victory standardized for 100 possessions and adjusted for opponent.
+
+## The hypothesis here is that teams that are seeded as a 1 but truly profile as a 2 or 3 will underachieve come the tournament.
+
+```{r}
+KenPom <- KenPom %>% 
+  mutate(SeedAdj = Seed - EMSeed)
+```
+
+## The next GLM I'm going to look at is the SeedAdj variable and see how it interacts with seed against whether or not the team underachieved. 
+
+```{r}
+SeedAdjModel <- glm(U_O ~ Seed * SeedAdj,
+                    data = KenPom, family = binomial) 
+
+plot_model(SeedAdjModel, type = "int", 
+           mdrt.values = "all") + scale_x_continuous(breaks = seq(0, 9, by = 1)) + scale_y_continuous(breaks = seq(0, 1, by = 0.1))
+
+```
+## What the red, blue and green lines show is that as the seed adjustment increases (teams are more correctly seeds or underseeded) the tendency to underachieve gets flatter/less volatile. But the most important thing for this presentation is that red line representing the biggest overseeded teams and the higher seeds that are overseeded have a tendency to underachieve.
+
+```{r}
+summary(SeedAdjModel)
+
+```
+## Considering the findings in the previous plot, I want to filter out the top 4 seeds to see how each team performs relative to where they should have been seeded based on the KenPom efficiency metrics. First up is the One Seeds.
+
+```{r}
+OneSeeds <- KenPom %>% 
+  filter(Seed == 1)
+
+OneSeeds %>% 
+  group_by(U_O) %>% 
+  summarise(count_teams = n(), meanEMSeed = mean(EMSeed), meanAdjEM = mean(AdjEM))
+```
+## This summary data shows that the teams that underachieve have a higher relative adjusted seed and lower efficiency margin then teams that don't.
+
+
+```{r}
+OneSeedModel <- glm(U_O ~ EMSeed,
+                    data = OneSeeds, family = binomial) 
+
+
+plot_model(OneSeedModel, type = "pred", terms = "EMSeed") + 
+  theme_minimal() + scale_x_continuous(breaks = seq(1, 4, by = 1)) + 
+  scale_y_continuous(breaks = seq(0.5, 1, by = 0.1), labels = scales::percent) + ggtitle("Predicted Probabilities - Underachievment of 1 Seeds") + 
+  xlab("Adjusted Seed") + ylab("% Chance of Underachieving")
+
+
+```
+## One-seeds correctly seeded as a 1 seed underachieve 59% of the time, but that increases all the way to 74% when they are overseeded just one spot. That trend of increasing odds of underachievement continues on through EMSeeds 3 and 4.
+
+
+```{r}
+summary(OneSeedModel)
+```
+
+## Next up are the Two Seeds
+
+```{r}
+TwoSeeds <- KenPom %>% 
+  filter(Seed == 2)
+
+TwoSeeds %>% 
+  group_by(U_O) %>% 
+  summarise(count_teams = n(), meanEMSeed = mean(EMSeed), meanAdjEM = mean(AdjEM))
+```
+## The same trends of EM Seed and AdjEM as in the one seeds are present in the data for two seeds - more overseeded, worse efficiency margin, more chance to underachieve
+
+```{r}
+TwoSeedModel <- glm(U_O ~ EMSeed,
+                    data = TwoSeeds, family = binomial)
+
+plot_model(TwoSeedModel, type = "pred", terms = "EMSeed") + theme_minimal() + scale_x_continuous(breaks = seq(1, 6, by = 1)) + scale_y_continuous(breaks = seq(0.5, 1, by = 0.1), labels = scales::percent) + ggtitle("Predicted Probabilities - Underachievment of 2 Seeds") + xlab("Adjusted Seed") + ylab("% Chance of Underachieving")
+
+```
+## While not as significant as the 1 seed data, there is still approximately a 5% increase in chance of underachieving for every one spot a team is overseeded.
+
+
+```{r}
+summary(TwoSeedModel)
+```
+## On to the Three Seeds...
+
+```{r}
+ThreeSeeds <- KenPom %>% 
+  filter(Seed == 3)
+
+ThreeSeeds %>% 
+  group_by(U_O) %>% 
+  summarise(count_teams = n(), meanEMSeed = mean(EMSeed), meanAdjEM = mean(AdjEM))
+```
+## The trend continues...on to the model
+
+
+```{r}
+ThreeSeedModel <- glm(U_O ~ EMSeed,
+                    data = ThreeSeeds, family = binomial) 
+
+plot_model(ThreeSeedModel, type = "pred", terms = "EMSeed") + theme_minimal() + scale_x_continuous(breaks = seq(1, 10, by = 1)) + scale_y_continuous(breaks = seq(0.5, 1, by = 0.1), labels = scales::percent) + ggtitle("Predicted Probabilities - Underachievment of 3 Seeds") + xlab("Adjusted Seed") + ylab("% Chance of Underachieving")
+```
+## You'll see here that as move further downt the seed line to 3, there is a greater tendency for teams to be overseeded. There are some 3 seeds in this dataset that profile as low as a 10 seed. And we are seeing the same trends here that as the adjusted seed gets higher, the more chance for underachieivng there is
+
+```{r}
+summary(ThreeSeedModel)
+```
+## On to the four seeds
+
+```{r}
+FourSeeds <- KenPom %>% 
+  filter(Seed == 4)
+
+FourSeeds %>% 
+  group_by(U_O) %>% 
+  summarise(count_teams = n(), meanEMSeed = mean(EMSeed), meanAdjEM = mean(AdjEM))
+```
+## This data is VERY interesting in that only 12 of the 88 teams seeded at 4 meet or exceed their expectations. This is the starkest divide we've seen so far between underachieve or meeting/exceeding expectations. There is almost a 1 seed difference between meet or exceed and underachieve here.
+
+## Here we plot the model
+
+```{r}
+FourSeedModel <- glm(U_O ~ EMSeed,
+                    data = FourSeeds, family = binomial) 
+
+plot_model(FourSeedModel, type = "pred", terms = "EMSeed") + theme_minimal() + scale_x_continuous(breaks = seq(1, 11, by = 1)) + scale_y_continuous(breaks = seq(0.5, 1, by = 0.1), labels = scales::percent) + ggtitle("Predicted Probabilities - Underachievment of 4 Seeds") + xlab("Adjusted Seed") + ylab("% Chance of Underachieving")
+```
+###Finally, I lump all of the 4 seeds together. This captures all 1-4 seeds and their actual seed vs chance of underachieving.
+
+```{r}
+Top4Seeds <- KenPom %>% 
+  filter(Seed %in% c(1,2,3,4))
+
+Top4SeedsModel <- glm(U_O ~ EMSeed,
+                    data = Top4Seeds, family = binomial) 
+
+plot_model(Top4SeedsModel, type = "pred", terms = "EMSeed") + theme_minimal() + scale_x_continuous(breaks = seq(-7, 15, by = 1)) + scale_y_continuous(breaks = seq(0.5, 1, by = 0.1), labels = scales::percent) + ggtitle("Predicted Probabilities - Underachievment of Top 4 Seeds") + xlab("Adjusted Seed") + ylab("% Chance of Underachieving")
+```
+## When all of the teams seeded 1-4 are lumped together, there is clearly significance in the dataset that would allow the ability to pinpoint teams that may underachieve.
+
+## These exact results came to pass in this year's NCAA Tournament. 5 of the 16 teams seeded 1-4 - #1 seed North Carolina, #2 seed Marquette, #3 seed Baylor, #3 Kentucky and #4 Kansas - all underachieved relative to their seed expectations. 
+
+
+
